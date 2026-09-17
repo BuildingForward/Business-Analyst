@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "business-analyst"
+version = "0.1.0"
+description = "Finds, screens and analyses businesses acquirable with no cash down."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40.0"]
+
+[project.scripts]
+business-analyst = "business_analyst.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["business_analyst*"]

@@ -1,0 +1,3 @@
+# The core bot runs on the standard library alone.
+# This is needed only for --provider anthropic.
+anthropic>=0.40.0

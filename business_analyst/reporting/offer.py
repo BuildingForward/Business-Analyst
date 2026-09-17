@@ -1,0 +1,138 @@
+"""Letter of intent generator.
+
+Produces a non-binding LOI from the structure the finance engine cleared.
+It is a drafting aid: an attorney reviews it before it reaches a seller.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Optional
+
+from ..models import DealReport, Listing, OfferStructure
+
+
+def _money(value: Optional[float]) -> str:
+    return f"${value:,.0f}" if value is not None else "$0"
+
+
+def render_loi(
+    report: DealReport,
+    buyer_name: str = "[Buyer entity]",
+    buyer_contact: str = "[contact details]",
+    diligence_days: int = 45,
+    exclusivity_days: int = 60,
+    today: Optional[date] = None,
+) -> str:
+    """Draft a non-binding letter of intent."""
+    l: Listing = report.listing
+    offer: Optional[OfferStructure] = report.offer
+    today = today or date.today()
+
+    if offer is None:
+        raise ValueError("Cannot draft an LOI without a structured offer.")
+
+    note = offer.notes[0] if offer.notes else None
+    seller_note_line = (
+        f"{_money(note.principal)} carried by the Seller under a promissory note bearing "
+        f"interest at {note.annual_rate * 100:.1f}% per annum, amortised over "
+        f"{note.term_years} years, with no payments for the first {note.standby_months} "
+        f"months and interest-only payments for the following {note.interest_only_months} "
+        f"months."
+        if note
+        else "No seller note contemplated."
+    )
+
+    earnout_clause = (
+        f"\n4. **Earnout.** In addition to the above, Buyer shall pay Seller "
+        f"{offer.earnout_pct_of_sde * 100:.0f}% of seller's discretionary earnings above the "
+        f"trailing twelve-month baseline as of Closing, payable annually for "
+        f"{offer.earnout_years} years following Closing."
+        if offer.earnout_pct_of_sde
+        else ""
+    )
+
+    holdback_clause = (
+        f"\n5. **Holdback.** {_money(offer.holdback)} of the Purchase Price shall be held "
+        "back and set off against any breach of the representations and warranties and "
+        "against any working capital shortfall determined in the post-closing true-up."
+        if offer.holdback
+        else ""
+    )
+
+    return f"""# Non-Binding Letter of Intent
+
+**Date:** {today.isoformat()}
+**Buyer:** {buyer_name}
+**Seller:** owner of {l.name}{f", {l.location}" if l.location else ""}
+**Re:** Proposed acquisition of {l.name}
+
+Dear Seller,
+
+Thank you for the opportunity to review {l.name}. This letter sets out the terms on
+which {buyer_name} ("Buyer") proposes to acquire the business. It is an expression of
+interest only and is **not binding** on either party except as to the Exclusivity and
+Confidentiality paragraphs below.
+
+## Proposed terms
+
+1. **Purchase Price.** {_money(offer.purchase_price)}, on a cash-free, debt-free basis,
+   subject to a normalised working capital target agreed during diligence.
+
+2. **Cash at Closing.** {_money(offer.cash_at_close)}.
+
+3. **Seller Financing.** {seller_note_line} The note will be secured by the assets of the
+   business and will be subject to customary default and cure provisions.{earnout_clause}{holdback_clause}
+
+## Structure
+
+The transaction is contemplated as an asset purchase, with Buyer acquiring the assets
+used in the business free of liens and assuming only those liabilities expressly agreed.
+Buyer's ability to service the seller note depends on the earnings of the business, and
+the proposed terms reflect earnings of {_money(l.sde)} as represented by Seller. Buyer's
+underwriting shows debt service coverage of {offer.dscr:.2f}x on those figures.
+
+## Conditions
+
+This proposal is subject to:
+
+- Completion of financial, legal and operational due diligence to Buyer's satisfaction
+  within {diligence_days} days, including review of tax returns, bank statements and a
+  quality-of-earnings analysis of the represented earnings;
+- Verification of customer contracts and their assignability;
+- Agreement on a transition period during which Seller remains available to the business;
+- Transfer or reissue of all licences and permits necessary to operate;
+- Negotiation and execution of a definitive purchase agreement.
+
+## Exclusivity
+
+In consideration of the costs Buyer will incur in diligence, Seller agrees not to solicit,
+entertain or negotiate any competing offer for {exclusivity_days} days from the date this
+letter is countersigned. This paragraph is binding.
+
+## Confidentiality
+
+Each party shall keep confidential the existence and terms of this letter and all
+information exchanged, except as required by law or disclosed to professional advisers.
+This paragraph is binding.
+
+## Expiry
+
+This proposal expires 14 days from the date above unless extended in writing.
+
+Sincerely,
+
+{buyer_name}
+{buyer_contact}
+
+---
+
+**Agreed and accepted:**
+
+Seller: ______________________________  Date: ______________
+
+---
+
+*Draft generated by the business analyst bot. Non-binding. Have a licensed attorney in
+the relevant jurisdiction review this before it is sent.*
+"""
