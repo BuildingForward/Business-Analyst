@@ -106,6 +106,38 @@ _PROFILES: List[IndustryProfile] = [
     ),
 ]
 
+# Revenue per employee and SDE margin, by industry. These are priors for
+# banding an off-market business by size when the owner has disclosed
+# nothing - is this a $100k SDE business or a $1M one? They are not a
+# valuation and must never be presented as the owner's actual figures.
+_SIZE_PRIORS: Dict[str, tuple] = {
+    "home services": (150_000, 0.15),
+    "hvac": (180_000, 0.15),
+    "plumbing": (175_000, 0.15),
+    "landscaping": (90_000, 0.15),
+    "commercial cleaning": (45_000, 0.12),
+    "accounting": (120_000, 0.30),
+    "insurance agency": (150_000, 0.30),
+    "managed it services": (160_000, 0.20),
+    "staffing": (200_000, 0.08),
+    "manufacturing": (200_000, 0.12),
+    "e-commerce": (400_000, 0.12),
+    "saas": (200_000, 0.20),
+    "restaurant": (65_000, 0.08),
+    "retail": (200_000, 0.06),
+    "laundromat": (150_000, 0.25),
+    "self storage": (250_000, 0.40),
+    "trucking": (190_000, 0.10),
+    "medical practice": (200_000, 0.25),
+    "auto repair": (130_000, 0.14),
+    "pest control": (120_000, 0.20),
+}
+
+for _profile in _PROFILES:
+    _rpe, _margin = _SIZE_PRIORS.get(_profile.name, (150_000, 0.12))
+    _profile.revenue_per_employee = _rpe
+    _profile.sde_margin = _margin
+
 _ALIASES: Dict[str, str] = {
     "heating": "hvac", "air conditioning": "hvac", "hvacr": "hvac", "heating and cooling": "hvac",
     "janitorial": "commercial cleaning", "cleaning": "commercial cleaning",

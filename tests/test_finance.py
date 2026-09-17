@@ -115,9 +115,10 @@ class TestOffers(unittest.TestCase):
         self.assertTrue(offer.viable)
 
     def test_offer_never_exceeds_the_ask(self):
+        """An ask below what the cash flow supports is simply accepted."""
         cheap = Listing(source="t", external_id="2", name="Cheap", asking_price=200_000,
-                        cash_flow=180_000)
-        offer = build_offer(cheap)
+                        cash_flow=400_000)
+        offer = build_offer(cheap, StructureParams(buyer_salary=150_000))
         self.assertEqual(offer.purchase_price, 200_000)
         self.assertEqual(offer.earnout_pct_of_sde, 0.0, "no gap means no earnout")
 
@@ -177,18 +178,20 @@ class TestStress(unittest.TestCase):
 
     def test_breakeven_is_zero_when_deal_does_not_clear(self):
         """SDE that cannot even cover the operator's salary has no cushion."""
+        params = StructureParams(buyer_salary=60_000)
         weak = Listing(source="t", external_id="9", name="Weak", asking_price=100_000,
                        cash_flow=50_000)
-        self.assertFalse(build_offer(weak).viable)
-        self.assertEqual(breakeven_haircut(weak), 0.0)
+        self.assertFalse(build_offer(weak, params).viable)
+        self.assertEqual(breakeven_haircut(weak, params), 0.0)
 
     def test_marginal_deal_has_a_small_cushion(self):
         """Pricing at the 1.5x target against a 1.25x floor always leaves slack."""
+        params = StructureParams(buyer_salary=60_000)
         thin = Listing(source="t", external_id="10", name="Thin", asking_price=100_000,
                        cash_flow=61_000)
-        offer = build_offer(thin)
+        offer = build_offer(thin, params)
         self.assertTrue(offer.viable)
-        cushion = breakeven_haircut(thin, offer=offer)
+        cushion = breakeven_haircut(thin, params, offer=offer)
         self.assertGreater(cushion, 0.0)
         self.assertLess(cushion, 0.05, "a marginal deal must not look safe")
 

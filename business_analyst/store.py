@@ -51,6 +51,34 @@ CREATE TABLE IF NOT EXISTS sections (
     FOREIGN KEY (deal_id) REFERENCES deals(deal_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS prospects (
+    prospect_id   TEXT PRIMARY KEY,
+    fingerprint   TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    external_id   TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    industry      TEXT,
+    city          TEXT,
+    state         TEXT,
+    phone         TEXT,
+    email         TEXT,
+    website       TEXT,
+    est_sde       REAL,
+    score         REAL,
+    qualified     INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL,
+    prospect_json TEXT NOT NULL,
+    estimate_json TEXT,
+    score_json    TEXT,
+    exported_at   TEXT,
+    discovered_at TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prospects_fingerprint ON prospects(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_prospects_score ON prospects(score DESC);
+CREATE INDEX IF NOT EXISTS idx_prospects_status ON prospects(status);
+CREATE INDEX IF NOT EXISTS idx_prospects_qualified ON prospects(qualified);
+
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at  TEXT NOT NULL,
@@ -253,6 +281,125 @@ class DealStore:
             ).fetchall()
         return [_row_to_report(r, []) for r in rows]
 
+    # ---- prospects ----------------------------------------------------
+
+    def upsert_prospect(self, report) -> str:
+        """Insert or update an off-market prospect."""
+        p = report.prospect
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO prospects (prospect_id, fingerprint, source, external_id,
+                    name, industry, city, state, phone, email, website, est_sde,
+                    score, qualified, status, prospect_json, estimate_json, score_json,
+                    exported_at, discovered_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(prospect_id) DO UPDATE SET
+                    name=excluded.name,
+                    industry=excluded.industry,
+                    phone=excluded.phone,
+                    email=excluded.email,
+                    website=excluded.website,
+                    est_sde=excluded.est_sde,
+                    score=excluded.score,
+                    qualified=excluded.qualified,
+                    status=excluded.status,
+                    prospect_json=excluded.prospect_json,
+                    estimate_json=excluded.estimate_json,
+                    score_json=excluded.score_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    p.prospect_id, p.fingerprint, p.source, p.external_id, p.name,
+                    p.industry, p.city, p.state, p.phone, p.email, p.website,
+                    report.estimate.sde if report.estimate else None,
+                    report.score.total if report.score else None,
+                    1 if (report.score and report.score.passed) else 0,
+                    report.status.value,
+                    json.dumps(p.to_dict()),
+                    json.dumps(report.estimate.to_dict()) if report.estimate else None,
+                    json.dumps(report.score.to_dict()) if report.score else None,
+                    None, p.discovered_at, report.updated_at,
+                ),
+            )
+        return p.prospect_id
+
+    def prospect_exists(self, prospect) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM prospects WHERE prospect_id=? OR fingerprint=? LIMIT 1",
+                (prospect.prospect_id, prospect.fingerprint),
+            ).fetchone()
+        return row is not None
+
+    def get_prospect(self, prospect_id: str):
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM prospects WHERE prospect_id=?", (prospect_id,)
+            ).fetchone()
+        return _row_to_prospect_report(row) if row else None
+
+    def top_prospects(
+        self,
+        limit: int = 50,
+        min_score: float = 0.0,
+        unexported_only: bool = False,
+        qualified_only: bool = True,
+    ):
+        """Best-scoring prospects, optionally only those not yet handed off.
+
+        `qualified_only` defaults to True and must stay that way for
+        anything feeding outreach: a prospect can score well on the weighted
+        factors while hard-failing (a franchise, an excluded industry), and
+        approaching one of those is worse than approaching nobody.
+        """
+        query = "SELECT * FROM prospects WHERE COALESCE(score, 0) >= ?"
+        params: list = [min_score]
+        if qualified_only:
+            query += " AND qualified = 1"
+        if unexported_only:
+            query += " AND exported_at IS NULL"
+        query += " ORDER BY score DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [_row_to_prospect_report(r) for r in conn.execute(query, params)]
+
+    def mark_exported(self, prospect_ids) -> int:
+        """Record that a prospect has been handed to the outreach agent."""
+        from datetime import datetime, timezone
+
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ids = list(prospect_ids)
+        if not ids:
+            return 0
+        with self.connect() as conn:
+            conn.executemany(
+                "UPDATE prospects SET exported_at=? WHERE prospect_id=?",
+                [(stamp, pid) for pid in ids],
+            )
+        return len(ids)
+
+    def set_prospect_status(self, prospect_id: str, status) -> None:
+        value = status.value if hasattr(status, "value") else str(status)
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE prospects SET status=? WHERE prospect_id=?", (value, prospect_id)
+            )
+
+    def prospect_counts(self) -> dict:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) c FROM prospects GROUP BY status"
+            ).fetchall()
+            total = conn.execute("SELECT COUNT(*) c FROM prospects").fetchone()["c"]
+            exported = conn.execute(
+                "SELECT COUNT(*) c FROM prospects WHERE exported_at IS NOT NULL"
+            ).fetchone()["c"]
+        counts = {r["status"]: r["c"] for r in rows}
+        counts["total"] = total
+        counts["exported"] = exported
+        return counts
+
     def counts(self) -> dict:
         with self.connect() as conn:
             rows = conn.execute("SELECT stage, COUNT(*) c FROM deals GROUP BY stage").fetchall()
@@ -260,6 +407,21 @@ class DealStore:
         counts = {r["stage"]: r["c"] for r in rows}
         counts["total"] = total
         return counts
+
+
+def _row_to_prospect_report(row: sqlite3.Row) -> "ProspectReport":
+    from .models import Estimate, Prospect, ProspectReport, ScoreComponent
+
+    prospect = Prospect.from_dict(json.loads(row["prospect_json"]))
+    estimate = Estimate.from_dict(json.loads(row["estimate_json"])) if row["estimate_json"] else None
+    score = None
+    if row["score_json"]:
+        score = DealScore.from_dict(json.loads(row["score_json"]))
+        score.components = [ScoreComponent(**c) for c in score.components]
+    return ProspectReport(
+        prospect=prospect, estimate=estimate, score=score,
+        status=row["status"], updated_at=row["updated_at"],
+    )
 
 
 def _row_to_report(row: sqlite3.Row, section_rows) -> DealReport:

@@ -29,6 +29,19 @@ class DealStage(str, Enum):
     OFFER_DRAFTED = "offer_drafted"
 
 
+class OutreachStatus(str, Enum):
+    """Where an off-market approach has got to."""
+
+    NOT_CONTACTED = "not_contacted"
+    QUEUED = "queued"
+    SENT = "sent"
+    REPLIED = "replied"
+    CONVERSATION = "conversation"
+    FINANCIALS_REQUESTED = "financials_requested"
+    NOT_INTERESTED = "not_interested"
+    DO_NOT_CONTACT = "do_not_contact"
+
+
 class SellerFinancing(str, Enum):
     """What the listing says about seller/owner financing."""
 
@@ -259,7 +272,126 @@ class IndustryProfile(_JsonMixin):
     capital_intensity: str           # low | medium | high
     owner_dependence: str            # low | medium | high
     notes: str = ""
+    #: Rough US small-business priors, used only to band an off-market
+    #: business by size when nothing has been disclosed. Not a valuation.
+    revenue_per_employee: float = 150_000.0
+    sde_margin: float = 0.12
 
     @property
     def mid_multiple(self) -> float:
         return (self.typical_sde_multiple_low + self.typical_sde_multiple_high) / 2
+
+
+@dataclass
+class Prospect(_JsonMixin):
+    """A local business that is NOT for sale.
+
+    This is the off-market side of the funnel. Nothing is disclosed: no
+    asking price, no revenue, no SDE. Everything financial about a prospect
+    is an estimate derived from headcount and industry priors, and is
+    labelled as such wherever it is shown.
+    """
+
+    source: str
+    external_id: str
+    name: str
+    industry: str = "unclassified"
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    postcode: str = ""
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+
+    phone: str = ""
+    email: str = ""
+    website: str = ""
+    owner_name: str = ""
+
+    employees: Optional[int] = None
+    established_year: Optional[int] = None
+    is_chain: bool = False
+    review_count: Optional[int] = None
+
+    notes: str = ""
+    raw: Dict[str, Any] = field(default_factory=dict)
+    discovered_at: str = field(default_factory=_utcnow)
+
+    @property
+    def prospect_id(self) -> str:
+        basis = f"{self.source}:{self.external_id}".lower()
+        return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+
+    @property
+    def fingerprint(self) -> str:
+        """Collapses the same business found via two sources."""
+        name = "".join(ch for ch in self.name.lower() if ch.isalnum())
+        if self.phone:
+            digits = "".join(ch for ch in self.phone if ch.isdigit())[-10:]
+            return hashlib.sha1(f"{name}|{digits}".encode("utf-8")).hexdigest()[:16]
+        locality = "".join(ch for ch in f"{self.address}{self.city}".lower() if ch.isalnum())
+        return hashlib.sha1(f"{name}|{locality}".encode("utf-8")).hexdigest()[:16]
+
+    @property
+    def age_years(self) -> Optional[int]:
+        if not self.established_year:
+            return None
+        return max(0, date.today().year - self.established_year)
+
+    @property
+    def has_contact(self) -> bool:
+        return bool(self.phone or self.email or (self.address and self.city))
+
+    @property
+    def location(self) -> str:
+        return ", ".join(filter(None, [self.city, self.state]))
+
+
+@dataclass
+class Estimate(_JsonMixin):
+    """Modelled financials for a business that has disclosed nothing."""
+
+    revenue: Optional[float] = None
+    sde: Optional[float] = None
+    indicative_price_low: Optional[float] = None
+    indicative_price_high: Optional[float] = None
+    basis: str = ""
+    confidence: str = "low"          # low | medium (never high - it is a guess)
+
+    @property
+    def known(self) -> bool:
+        return self.sde is not None
+
+
+@dataclass
+class OutreachDraft(_JsonMixin):
+    """One prepared touch in an outreach sequence."""
+
+    channel: str                     # letter | email | call | voicemail
+    step: int
+    subject: str
+    body: str
+    send_after_days: int = 0
+    rationale: str = ""
+
+
+@dataclass
+class ProspectReport(_JsonMixin):
+    """Everything the bot knows about an off-market target."""
+
+    prospect: Prospect
+    estimate: Optional[Estimate] = None
+    score: Optional[DealScore] = None
+    offer: Optional[OfferStructure] = None
+    outreach: List[OutreachDraft] = field(default_factory=list)
+    status: OutreachStatus = OutreachStatus.NOT_CONTACTED
+    updated_at: str = field(default_factory=_utcnow)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.status, str):
+            self.status = OutreachStatus(self.status)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = super().to_dict()
+        payload["prospect_id"] = self.prospect.prospect_id
+        return payload

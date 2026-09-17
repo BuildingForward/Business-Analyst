@@ -39,13 +39,18 @@ is the standard library.
 
 ## What it produces
 
-For the bundled sample data, 12 listings reduce to 7 candidates:
+For the bundled sample data, 12 listings reduce to 6 candidates at the default
+$150,000 operator salary:
 
 | Deal | Industry | Ask | SDE | Mult | Score | Offer | Cash | DSCR |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Coastal Pest Defense | pest control | $780,000 | $268,000 | 2.9x | 80.9 | $662,933 | $0 | 1.50x |
-| Sparkle Commercial Cleaning | commercial cleaning | $450,000 | $185,000 | 2.4x | 77.8 | $398,397 | $0 | 1.50x |
-| Nimbus Managed IT | managed it services | $1,450,000 | $395,000 | 3.7x | 73.9 | $1,067,705 | $0 | 1.50x |
+| Coastal Pest Defense | pest control | $780,000 | $268,000 | 2.9x | 75.5 | $376,087 | $0 | 1.50x |
+| Nimbus Managed IT | managed it services | $1,450,000 | $395,000 | 3.7x | 70.3 | $780,859 | $0 | 1.50x |
+| Sparkle Commercial Cleaning | commercial cleaning | $450,000 | $185,000 | 2.4x | 70.0 | $111,551 | $0 | 1.50x |
+
+Note how hard the salary bites: Sparkle's $185k of SDE only supports a $112k
+price once a $150k operator is paid first, against a $450k ask. At this salary
+you need SDE comfortably north of $250k before the numbers reach an ask.
 
 and the five rejections each carry a reason:
 
@@ -55,6 +60,7 @@ Bayside Pizzeria:      SDE $88,000 below the $100,000 floor
 Atlas Freight:         Priced at 5.4x SDE, above the 4.5x limit
 Sunshine Storage:      Priced at 8.1x SDE, above the 4.5x limit
 Petal & Stem Florist:  SDE $62,000 below the $100,000 floor
+Everglade Lawn:        SDE $142,000 does not cover the $150,000 operator salary
 Harborview Dental:     Industry 'medical practice' is excluded from the thesis
 ```
 
@@ -66,6 +72,8 @@ plus a draft LOI where the structure clears.
 
 The structure is deliberately boring, because boring is what sellers sign:
 
+- **Operator salary paid first.** Default $150,000, taken off SDE before any
+  debt service. A business whose SDE cannot cover it is a hard fail, at any price.
 - **Seller note for the whole price.** Default 6% over 7 years.
 - **3 months of standby.** No payments at all, so you bank working capital before
   the first one is due. Interest accrues to principal during this window.
@@ -97,6 +105,115 @@ The price and the note are held **fixed** while the seller's earnings claim is
 discounted. That is the number that matters: sellers add back aggressively, and a
 note that only covers at the seller's own figures is how a no-money-down deal
 becomes a personal liability. The memo reports the exact breakeven.
+
+## Off-market prospecting
+
+The listing pipeline works on businesses that are already for sale, where you
+compete with every other buyer. The prospecting pipeline is the other half:
+pull every local business in an area, qualify the ones that look like
+owner-finance candidates, and hand the list to an outreach agent.
+
+```bash
+export GOOGLE_PLACES_API_KEY=...
+python3 -m business_analyst prospect --area "Tampa, FL" --radius 15 \
+    --industry hvac --industry plumbing --industry "pest control"
+```
+
+```
+412 pulled, 412 new, 63 qualified, 349 rejected, 63 handed off
+94 billable Places requests used.
+Handoff written to handoff/ (prospects.json, prospects.csv, README.md)
+```
+
+### Why the Places API and not scraping
+
+Google is the source, but through the official **Places API (New)**, not by
+scraping search or Maps pages. Scraping those violates Google's terms, and
+Google defends against it in practice: markup churns, CAPTCHAs appear, then the
+IP is banned. A bot whose whole point is running unattended cannot rest on a
+source that fails silently and poisons your IP. The API returns the same fields
+as structured JSON that does not break.
+
+The API is billable beyond a recurring free monthly credit, so three mechanisms
+keep a run inside it:
+
+- a **field mask** on every request, since Places bills by the fields returned —
+  only the fields the screener actually reads are requested;
+- a **hard request cap** (`--max-requests`, default 120), checked before each call;
+- a **disk cache** keyed by request, so re-running over the same area is free.
+
+Enumerating an area means tiling it: Nearby Search returns at most 20 results
+per call and does not paginate, so the source walks a lattice of overlapping
+circles across the search radius and de-duplicates by place id. `--step`
+controls the tile size; smaller tiles mean better coverage and more requests.
+
+### Qualifying a business that discloses nothing
+
+An unlisted business has no asking price and no SDE, so the prospect screener
+does two things the listing screener never has to.
+
+It **estimates size** from headcount (or, failing that, review volume as a
+coarse proxy) times an industry revenue-per-employee prior, at an industry SDE
+margin. Every such figure is labelled an estimate and is namespaced under
+`estimates` in the export so it can never be mistaken for a disclosed fact.
+
+It **scores succession pressure** — the likelihood an unlisted owner would
+entertain an approach at all: years trading, long-tenure language, and the
+absence of a website (which usually means an older owner and, more usefully,
+far fewer competing buyers looking at the same business).
+
+Hard fails knock a prospect out before it can ever reach an email: a chain or
+franchise outlet (nobody there can sell you the business), an excluded
+industry, fewer than `--min-age` years trading, no contact route, or an
+estimated SDE below the operator salary.
+
+### The handoff
+
+`prospect` writes three files for the downstream outreach agent:
+
+| File | Contents |
+| --- | --- |
+| `prospects.json` | Full records on a versioned schema |
+| `prospects.csv` | Flat view, estimate columns prefixed `est_` |
+| `README.md` | Schema docs and the constraints the agent must honour |
+
+Each record carries contact details, the qualification rationale in plain
+language, namespaced estimates, verifiable personalization hooks, a suggested
+angle for that specific owner, and a `do_not_claim` list:
+
+```json
+"do_not_claim": [
+  "Do not state revenue, profit, SDE or employee count as fact. Every figure
+   in `estimates` is modelled from industry averages, not disclosed by the owner.",
+  "Do not claim or imply the business is for sale, listed, or that the owner
+   has expressed interest. This is an unsolicited approach to an unlisted business.",
+  "Do not name a price, a multiple or an offer in a first touch."
+]
+```
+
+That list exists because an agent handed only `revenue: 1440000` will write
+"I see you're doing $1.4M" to an owner who never said any such thing. The
+`hooks` array is deliberately restricted to facts that came from the source, so
+nothing in it can be a fabrication.
+
+**Email coverage is the known gap.** Places returns a phone and a website but
+almost never an email address, so every record states its `email_status`:
+`present`, `missing_enrichable_from_website`, or `missing_no_route`. Records
+that are not `present` need an enrichment step before an email sequence can run.
+
+Handoffs are idempotent — an exported prospect is not exported again, so the
+same owner is never approached twice. Feed outcomes back as they come in:
+
+```bash
+python3 -m business_analyst prospects                      # the current list
+python3 -m business_analyst status --prospect <id> --set replied
+python3 -m business_analyst status --prospect <id> --set do_not_contact
+```
+
+Cold outreach is regulated. CAN-SPAM requires a valid physical postal address
+and a working opt-out in every commercial email in the US, and other
+jurisdictions are stricter. The handoff README repeats this for the agent, but
+the obligation is yours.
 
 ## The eight playbooks
 
@@ -165,7 +282,7 @@ whose terms you have read.
 
 ```bash
 python3 -m business_analyst run --source deals.csv \
-    --salary 80000 \        # operator salary taken before any debt service
+    --salary 150000 \       # operator salary taken before any debt service
     --target-dscr 1.75 \    # underwrite tighter
     --min-dscr 1.35 \       # floor below which a deal is not viable
     --rate 0.07 --term 10 \ # seller note terms
@@ -188,6 +305,11 @@ intensity and owner dependence.
 | `offer --deal <id>` | Draft an LOI. |
 | `stress --deal <id>` | Stress the offer against an overstated SDE. |
 | `list` | Stored deals by score, with stage. |
+| `prospect` | Pull local businesses, qualify them, write the outreach handoff. |
+| `handoff` | Re-export the qualified prospect list. |
+| `prospects` | List stored prospects by score. |
+| `status --prospect <id>` | Record an outreach outcome. |
+| `place-types` | Industry to Google place type mapping. |
 | `prompts` / `industries` | Inspect the playbooks and the industry table. |
 
 ## Tests
@@ -196,7 +318,9 @@ intensity and owner dependence.
 python3 -m unittest discover -s tests
 ```
 
-118 tests, standard library only, no network and no API key. The finance module
+165 tests, standard library only, no network and no API key. The Google source
+is exercised through an injected transport, so its budget cap, field masks,
+caching and tile de-duplication are all covered without a live key. The finance module
 is tested hardest: amortisation against known values, that a fully amortising note
 actually reaches a zero balance, that the solved price reproduces the DSCR it was
 solved for, and that the number printed in a memo is recomputable from the note
@@ -211,4 +335,7 @@ printed beside it.
   That is what a quality-of-earnings analysis is for.
 - The LOI is a drafting aid. Have an attorney in the relevant jurisdiction review
   it before it reaches a seller.
+- Prospect financials are **modelled**, not disclosed. They are good enough to
+  band a business by size and decide whether it is worth a conversation. They
+  are not good enough to act on, and the export says so on every record.
 - Nothing here is legal, tax or investment advice.

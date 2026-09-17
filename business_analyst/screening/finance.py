@@ -165,7 +165,7 @@ def max_supportable_price(
 class StructureParams:
     """Knobs for how aggressively the bot structures an offer."""
 
-    buyer_salary: float = 60_000.0
+    buyer_salary: float = 150_000.0
     target_dscr: float = 1.5
     min_dscr: float = 1.25
     note_rate: float = 0.06

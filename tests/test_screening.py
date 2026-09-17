@@ -4,6 +4,7 @@ import unittest
 
 from business_analyst.models import Listing, SellerFinancing
 from business_analyst.screening import industries
+from business_analyst.screening.finance import StructureParams
 from business_analyst.screening.scoring import (
     ScreenConfig,
     infer_seller_financing,
@@ -119,8 +120,21 @@ class TestScoring(unittest.TestCase):
         self.assertIn("Acquirability score", score.explain())
 
     def test_thin_cushion_is_flagged(self):
-        score = score_listing(listing(asking_price=430_000, cash_flow=115_000))
+        """A deal that clears but only barely must say so."""
+        cfg = ScreenConfig(structure=StructureParams(buyer_salary=60_000))
+        score = score_listing(listing(asking_price=430_000, cash_flow=115_000), cfg)
         self.assertTrue(any("cushion" in f for f in score.flags))
+
+    def test_sde_below_the_operator_salary_is_a_hard_fail(self):
+        """The floor moves with the salary: raising it tightens the screen."""
+        cfg = ScreenConfig(structure=StructureParams(buyer_salary=150_000))
+        score = score_listing(listing(cash_flow=142_000), cfg)
+        self.assertFalse(score.passed)
+        self.assertTrue(any("operator salary" in f for f in score.hard_fails))
+
+    def test_same_deal_passes_at_a_lower_salary(self):
+        cfg = ScreenConfig(structure=StructureParams(buyer_salary=60_000))
+        self.assertTrue(score_listing(listing(cash_flow=142_000), cfg).passed)
 
     def test_real_estate_is_flagged(self):
         score = score_listing(listing(real_estate_included=True))

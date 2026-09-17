@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -24,8 +25,13 @@ from .reporting import render_loi, render_memo, render_shortlist
 from .screening.finance import StructureParams, sensitivity
 from .screening.industries import all_profiles
 from .screening.scoring import ScreenConfig, score_listing
+from .models import OutreachStatus
+from .prospecting_pipeline import ProspectPipeline, ProspectPipelineConfig
+from .screening.prospecting import ProspectConfig, estimate_financials, score_prospect
 from .sources import CsvSource, JsonApiSource, JsonSource, RssSource
 from .sources.base import SourceRegistry
+from .sources.google_places import INDUSTRY_TYPES, GooglePlacesSource
+from .sources.local import CsvProspectSource
 from .store import DealStore
 
 
@@ -46,6 +52,45 @@ def build_registry(specs: List[str]) -> SourceRegistry:
                 registry.register(JsonSource(path))
             else:
                 registry.register(CsvSource(path))
+    return registry
+
+
+def build_prospect_registry(args) -> SourceRegistry:
+    """Google Places by default; CSV sources when given."""
+    registry = SourceRegistry()
+    for spec in args.source or []:
+        registry.register(CsvProspectSource(Path(spec)))
+
+    if not args.no_google:
+        key = args.api_key or os.environ.get("GOOGLE_PLACES_API_KEY", "")
+        if not key:
+            if registry.names():
+                print(
+                    "No GOOGLE_PLACES_API_KEY set; using the CSV sources only.",
+                    file=sys.stderr,
+                )
+                return registry
+            raise SystemExit(
+                "Google Places needs an API key. Set GOOGLE_PLACES_API_KEY, or pass\n"
+                "--source <file.csv> with businesses you already have, or --no-google."
+            )
+        center = None
+        if args.center:
+            lat, _, lon = args.center.partition(",")
+            center = (float(lat), float(lon))
+        registry.register(
+            GooglePlacesSource(
+                api_key=key,
+                center=center,
+                area=args.area,
+                radius_km=args.radius,
+                step_km=args.step,
+                industries=args.industry or (),
+                max_requests=args.max_requests,
+                cache_dir=Path(args.places_cache) if args.places_cache else None,
+                include_chains=args.include_chains,
+            )
+        )
     return registry
 
 
@@ -228,6 +273,92 @@ def cmd_stress(args) -> int:
     return 0
 
 
+def cmd_prospect(args) -> int:
+    """Pull local businesses, qualify them, and write the outreach handoff."""
+    registry = build_prospect_registry(args)
+    if not registry.names():
+        print("No sources configured.", file=sys.stderr)
+        return 2
+
+    config = ProspectPipelineConfig(
+        screen=ProspectConfig(
+            structure=_structure_from_args(args),
+            min_age_years=args.min_age,
+            min_estimated_sde=args.min_sde if args.min_sde else None,
+            require_contact=not args.allow_uncontactable,
+            exclude_chains=not args.include_chains,
+        ),
+        output_dir=Path(args.handoff_dir),
+        fetch_limit=args.limit,
+        min_handoff_score=args.min_score,
+        only_unexported=not args.reexport,
+    )
+    pipeline = ProspectPipeline(DealStore(args.db), registry, config)
+    stats = pipeline.run_once()
+
+    print(stats.summary())
+    if stats.requests:
+        print(f"{stats.requests} billable Places requests used.")
+    for err in stats.errors:
+        print(f"error: {err}", file=sys.stderr)
+    if stats.exported:
+        print(f"Handoff written to {args.handoff_dir}/ (prospects.json, prospects.csv, README.md)")
+    else:
+        print("Nothing new qualified for handoff.")
+    return 1 if stats.errors else 0
+
+
+def cmd_handoff(args) -> int:
+    """Re-export the current qualified list without pulling anything new."""
+    config = ProspectPipelineConfig(
+        output_dir=Path(args.handoff_dir),
+        min_handoff_score=args.min_score,
+        only_unexported=not args.reexport,
+    )
+    pipeline = ProspectPipeline(DealStore(args.db), SourceRegistry(), config)
+    result = pipeline.handoff()
+    print(f"Exported {result['count']} prospects to {args.handoff_dir}/")
+    return 0
+
+
+def cmd_prospects(args) -> int:
+    """List stored prospects by score."""
+    store = DealStore(args.db)
+    counts = store.prospect_counts()
+    print("Prospects:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    reports = store.top_prospects(limit=args.limit, min_score=args.min_score)
+    if not reports:
+        print("None yet. Run `prospect` first.")
+        return 0
+    print(f"\n{'prospect id':<18}{'score':>7}  {'est SDE':>10}  {'email':<12}name")
+    for r in reports:
+        sde = r.estimate.sde if r.estimate and r.estimate.sde else 0
+        has_email = "yes" if r.prospect.email else "no"
+        print(
+            f"{r.prospect.prospect_id:<18}{r.score.total if r.score else 0:>7.1f}"
+            f"  {sde:>10,.0f}  {has_email:<12}{r.prospect.name}"
+        )
+    return 0
+
+
+def cmd_status(args) -> int:
+    """Record what the outreach agent came back with."""
+    store = DealStore(args.db)
+    if store.get_prospect(args.prospect) is None:
+        print(f"No prospect with id {args.prospect}", file=sys.stderr)
+        return 1
+    store.set_prospect_status(args.prospect, OutreachStatus(args.set))
+    print(f"{args.prospect} -> {args.set}")
+    return 0
+
+
+def cmd_place_types(args) -> int:
+    print(f"{'industry':<22}google place types")
+    for industry, types in sorted(INDUSTRY_TYPES.items()):
+        print(f"{industry:<22}{', '.join(types)}")
+    return 0
+
+
 def cmd_prompts(args) -> int:
     if args.show:
         book = prompt_lib.PLAYBOOKS.get(args.show)
@@ -277,7 +408,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--max-multiple", type=float, default=4.5)
 
     def add_structure_args(p):
-        p.add_argument("--salary", type=float, default=60_000.0, help="Operator salary taken first")
+        p.add_argument(
+            "--salary", type=float, default=150_000.0, help="Operator salary taken first"
+        )
         p.add_argument("--target-dscr", type=float, default=1.5)
         p.add_argument("--min-dscr", type=float, default=1.25)
         p.add_argument("--rate", type=float, default=0.06, help="Seller note rate, e.g. 0.06")
@@ -344,6 +477,53 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--deal", required=True)
     p.set_defaults(func=cmd_stress)
 
+    p = sub.add_parser(
+        "prospect",
+        help="Pull local businesses from Google, qualify them, write the outreach handoff",
+    )
+    add_structure_args(p)
+    p.add_argument("--area", default="", help='Area to search, e.g. "Tampa, FL"')
+    p.add_argument("--center", default="", help="lat,lon instead of --area (skips geocoding)")
+    p.add_argument("--radius", type=float, default=8.0, help="Search radius in km")
+    p.add_argument("--step", type=float, default=2.5, help="Grid tile size in km")
+    p.add_argument(
+        "--industry", action="append", default=[], choices=sorted(INDUSTRY_TYPES),
+        help="Repeatable; defaults to every mapped industry",
+    )
+    p.add_argument("--api-key", default=None, help="Defaults to $GOOGLE_PLACES_API_KEY")
+    p.add_argument("--max-requests", type=int, default=120, help="Cap on billable Places calls")
+    p.add_argument("--places-cache", default=".places-cache")
+    p.add_argument("--no-google", action="store_true", help="Use only --source CSV files")
+    p.add_argument("--source", action="append", default=[], help="CSV of businesses you hold")
+    p.add_argument("--limit", type=int, default=500)
+    p.add_argument("--min-age", type=int, default=10, help="Minimum years trading")
+    p.add_argument("--min-sde", type=float, default=0, help="Override the estimated-SDE floor")
+    p.add_argument("--min-score", type=float, default=50.0, help="Minimum score to hand off")
+    p.add_argument("--include-chains", action="store_true")
+    p.add_argument("--allow-uncontactable", action="store_true")
+    p.add_argument("--handoff-dir", default="handoff")
+    p.add_argument("--reexport", action="store_true", help="Include already-exported prospects")
+    p.set_defaults(func=cmd_prospect)
+
+    p = sub.add_parser("handoff", help="Re-export the qualified prospect list")
+    p.add_argument("--handoff-dir", default="handoff")
+    p.add_argument("--min-score", type=float, default=50.0)
+    p.add_argument("--reexport", action="store_true")
+    p.set_defaults(func=cmd_handoff)
+
+    p = sub.add_parser("prospects", help="List stored prospects by score")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--min-score", type=float, default=0.0)
+    p.set_defaults(func=cmd_prospects)
+
+    p = sub.add_parser("status", help="Record an outreach outcome against a prospect")
+    p.add_argument("--prospect", required=True)
+    p.add_argument("--set", required=True, choices=[s.value for s in OutreachStatus])
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("place-types", help="Show the industry to Google place type mapping")
+    p.set_defaults(func=cmd_place_types)
+
     p = sub.add_parser("prompts", help="List or print the analyst playbooks")
     p.add_argument("--show", default=None, help="Print one playbook's template")
     p.set_defaults(func=cmd_prompts)
@@ -360,7 +540,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         level=logging.DEBUG if getattr(args, "verbose", False) else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    if getattr(args, "source", None) == []:
+    needs_source = args.command in {"screen", "run", "watch"}
+    if needs_source and not getattr(args, "source", None):
         print("No --source given; nothing to fetch.", file=sys.stderr)
         return 2
     return args.func(args)

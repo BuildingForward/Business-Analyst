@@ -23,3 +23,5 @@ jobs:
           python -m business_analyst screen --source data/sample_listings.csv
           python -m business_analyst run --source data/sample_listings.csv \
             --provider dry-run --out /tmp/reports --db /tmp/deals.db
+          python -m business_analyst --db /tmp/deals.db prospect --no-google \
+            --source data/sample_prospects.csv --handoff-dir /tmp/handoff

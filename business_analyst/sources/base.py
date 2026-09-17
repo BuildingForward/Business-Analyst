@@ -70,6 +70,35 @@ def parse_pct(text: Optional[str]) -> Optional[float]:
     return max(0.0, min(1.0, value / 100 if value > 1 else value))
 
 
+# Signals that a location is corporate-owned or franchised. A chain outlet
+# has no owner who can sell you the business, so these must be filtered
+# whatever source they arrive from - not just the one that happened to
+# implement the check first.
+_CHAIN_HINTS = (
+    "mcdonald", "subway", "starbucks", "7-eleven", "walmart", "target",
+    "home depot", "lowe's", "autozone", "o'reilly", "jiffy lube", "midas",
+    "meineke", "valvoline", "roto-rooter", "rotorooter", "servpro", "terminix",
+    "orkin", "merry maids", "chem-dry", "jan-pro", "coverall", "u-haul",
+    "public storage", "extra space", "cubesmart", "h&r block", "jackson hewitt",
+    "geico", "state farm", "allstate", "progressive", "farmers insurance",
+    "ace hardware", "napa auto", "les schwab", "aamco", "maaco", "snap-on",
+)
+
+_FRANCHISE_WORDS = re.compile(r"\bfranchise[ed]?\b|\bcorporate[- ]owned\b|\bchain\b", re.I)
+
+
+def looks_like_chain(name: str, *context: str) -> bool:
+    """True if the name or surrounding text marks this as a chain outlet.
+
+    Context can be anything descriptive - listing copy, a notes column -
+    so an explicit "Franchise location" is caught as well as a known brand.
+    """
+    lowered = (name or "").lower()
+    if any(hint in lowered for hint in _CHAIN_HINTS):
+        return True
+    return bool(_FRANCHISE_WORDS.search(" ".join(c or "" for c in context)))
+
+
 class Source(ABC):
     """A place listings come from.
 

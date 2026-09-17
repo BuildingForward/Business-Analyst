@@ -100,6 +100,14 @@ def _hard_fails(listing: Listing, cfg: ScreenConfig, profile) -> List[str]:
     if sde is not None and sde > 0:
         if sde < cfg.min_sde:
             fails.append(f"SDE ${sde:,.0f} below the ${cfg.min_sde:,.0f} floor.")
+        # A business that cannot pay the operator can never service a note,
+        # whatever the price. This floor moves with the salary, so raising
+        # the salary automatically tightens the screen.
+        salary = cfg.structure.buyer_salary
+        if sde <= salary:
+            fails.append(
+                f"SDE ${sde:,.0f} does not cover the ${salary:,.0f} operator salary."
+            )
         if sde > cfg.max_sde:
             fails.append(f"SDE ${sde:,.0f} above the ${cfg.max_sde:,.0f} ceiling.")
     if listing.asking_price and listing.asking_price > cfg.max_asking_price:
